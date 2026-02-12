@@ -1,0 +1,20 @@
+[Unit]
+Description=Trading Notification Bot
+After=network.target
+
+[Service]
+Type=simple
+User=your-user
+WorkingDirectory=/path/to/trading-notification-bot
+Environment="PATH=/path/to/trading-notification-bot/.venv/bin"
+ExecStart=/path/to/trading-notification-bot/.venv/bin/python -m src.main
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trading-bot
+
+[Install]
+WantedBy=multi-user.target
