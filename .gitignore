@@ -212,3 +212,6 @@ data/*.db-journal
 data/chart_cache/*
 !data/chart_cache/.gitkeep
 logs/*.log
+logs/*.zip
+logs/*.gz
+bot.log
