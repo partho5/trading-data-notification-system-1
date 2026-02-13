@@ -84,35 +84,53 @@ class HealthMonitor:
         """
         endpoint = request.match_info.get("endpoint")
 
-        # Map endpoint names to job methods
-        job_map = {
-            "cnn_fear_greed": self.scheduler.job_cnn_fear_greed,
-            "reddit_trending": self.scheduler.job_reddit_trending,
-            "top_gainers": self.scheduler.job_top_gainers,
-            "sector_performance": self.scheduler.job_sector_performance,
-            "vix": self.scheduler.job_vix,
-            "economic_calendar": self.scheduler.job_economic_calendar,
-            "sec_insider": self.scheduler.job_sec_insider,
-            "yahoo_quote": self.scheduler.job_yahoo_quote,
-            # Benzinga (Premium)
-            "benzinga_news": self.scheduler.job_benzinga_news,
-            "benzinga_ratings": self.scheduler.job_benzinga_ratings,
-            "benzinga_earnings": self.scheduler.job_benzinga_earnings,
+        # Endpoint configuration for manual triggers
+        endpoint_config = {
+            "benzinga_news": {"api_method": "get_benzinga_news", "market_hours_only": False},
+            "benzinga_ratings": {"api_method": "get_benzinga_ratings", "market_hours_only": False},
+            "benzinga_earnings": {"api_method": "get_benzinga_earnings", "market_hours_only": False},
+            "yahoo_quote": {"api_method": "get_yahoo_finance_quote", "market_hours_only": False},
+            "top_gainers": {"api_method": "get_top_gainers", "market_hours_only": False},
+            "reddit_trending": {"api_method": "get_reddit_trending", "market_hours_only": False},
+            "cnn_fear_greed": {"api_method": "get_cnn_fear_greed", "market_hours_only": False},
+            "sector_performance": {"api_method": "get_sector_performance", "market_hours_only": False},
+            "economic_calendar": {"api_method": "get_economic_calendar", "market_hours_only": False},
+            "vix": {"api_method": "get_vix", "market_hours_only": False},
+            "sec_insider": {"api_method": "get_sec_insider", "market_hours_only": False},
         }
 
-        if endpoint not in job_map:
+        if endpoint not in endpoint_config:
             return web.json_response(
                 {
                     "success": False,
                     "error": f"Unknown endpoint: {endpoint}",
-                    "available": list(job_map.keys()),
+                    "available": list(endpoint_config.keys()),
                 },
                 status=404,
             )
 
         try:
             logger.info(f"Manually triggering job: {endpoint}")
-            await job_map[endpoint]()
+
+            # Check which scheduler type we're using
+            from .scheduler_v2 import OptimalScheduler
+
+            if isinstance(self.scheduler, OptimalScheduler):
+                # OptimalScheduler uses _execute_job
+                config = endpoint_config[endpoint]
+                await self.scheduler._execute_job(
+                    endpoint,
+                    config["api_method"],
+                    config["market_hours_only"]
+                )
+            else:
+                # TradingBotScheduler uses individual job_* methods
+                job_method_name = f"job_{endpoint}"
+                job_method = getattr(self.scheduler, job_method_name, None)
+                if job_method:
+                    await job_method()
+                else:
+                    raise AttributeError(f"Job method not found: {job_method_name}")
 
             return web.json_response(
                 {

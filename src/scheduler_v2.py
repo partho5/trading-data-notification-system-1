@@ -258,12 +258,6 @@ class OptimalScheduler:
             logger.info(f"No data available for {endpoint_name}, skipping (empty response)")
             return
 
-        # Check for duplicate
-        if self.deduplicator.is_duplicate(endpoint_name, data):
-            logger.info(f"Duplicate content detected for {endpoint_name}, skipping")
-            self.stats["skipped_duplicates"] += 1
-            return
-
         # Generate content (AI first, fallback to templates)
         twitter_text = None
         discord_description = None
@@ -282,26 +276,67 @@ class OptimalScheduler:
 
         self.stats["total_posts"] += 1
 
-        # Post to platforms
+        # Post to Discord
         try:
-            # Discord (no rate limit for webhooks)
-            if discord_description:
-                discord_embed = self.discord_formatter._error_embed(discord_description)
-                await self.discord_client.post(discord_embed)
+            # Check for duplicate on Discord
+            if self.deduplicator.is_duplicate(data, endpoint_name, "discord"):
+                logger.info(f"Duplicate content for {endpoint_name} on Discord, skipping")
+                self.stats["skipped_duplicates"] += 1
             else:
-                discord_embed = self._format_for_discord(endpoint_name, data)
-                await self.discord_client.post(discord_embed)
+                # Discord (no rate limit for webhooks)
+                if discord_description:
+                    # Create proper embed with AI-generated description
+                    endpoint_titles = {
+                        "benzinga_news": "📰 Benzinga News",
+                        "benzinga_ratings": "⭐ Analyst Ratings",
+                        "benzinga_earnings": "📊 Earnings Report",
+                        "yahoo_quote": "📈 Market Update",
+                        "top_gainers": "🚀 Top Gainers",
+                        "reddit_trending": "🔥 Reddit Trending",
+                        "cnn_fear_greed": "📊 Market Sentiment",
+                        "sector_performance": "🏢 Sector Performance",
+                        "vix": "📉 Volatility Index",
+                        "economic_calendar": "📅 Economic Calendar",
+                        "sec_insider": "📝 SEC Insider Trading",
+                    }
+                    title = endpoint_titles.get(endpoint_name, "📊 Market Update")
+                    discord_embed = self.discord_formatter.create_embed(
+                        title=title,
+                        description=discord_description,
+                        color=0x3498DB,
+                        timestamp=datetime.now(),
+                    )
+                    await self.discord_client.post_embed(discord_embed)
+                else:
+                    discord_embed = self._format_for_discord(endpoint_name, data)
+                    await self.discord_client.post_embed(discord_embed)
+
+                # Record successful Discord post
+                self.deduplicator.record_post(data, endpoint_name, "discord")
+                logger.info(f"Posted to Discord: {endpoint_name}")
         except Exception as e:
             logger.error(f"Discord posting error for {endpoint_name}: {e}")
             self.stats["failed_posts"] += 1
 
+        # Post to Twitter
         try:
-            # Twitter (with rate limiting)
-            if self.rate_limiter.can_post():
+            # Check for duplicate on Twitter
+            if self.deduplicator.is_duplicate(data, endpoint_name, "twitter"):
+                logger.info(f"Duplicate content for {endpoint_name} on Twitter, skipping")
+                self.stats["skipped_duplicates"] += 1
+            elif self.rate_limiter.can_post():
                 if not self.config.dry_run:
-                    await self.twitter_client.post(twitter_text)
-                    self.rate_limiter.record_post()
-                    logger.info(f"Posted to Twitter: {endpoint_name}")
+                    success = self.twitter_client.post_tweet(twitter_text)
+                    if success:
+                        self.rate_limiter.record_post()
+
+                        # Record successful Twitter post
+                        self.deduplicator.record_post(data, endpoint_name, "twitter")
+                        logger.info(f"Posted to Twitter: {endpoint_name}")
+                    else:
+                        logger.error(f"Failed to post to Twitter: {endpoint_name}")
+                        self.stats["failed_posts"] += 1
+                        return
                 else:
                     logger.info(f"[DRY RUN] Would post to Twitter: {twitter_text[:100]}...")
 
@@ -312,9 +347,6 @@ class OptimalScheduler:
         except Exception as e:
             logger.error(f"Twitter posting error for {endpoint_name}: {e}")
             self.stats["failed_posts"] += 1
-
-        # Record in deduplicator
-        self.deduplicator.add_content(endpoint_name, data)
 
     def _format_for_twitter(self, endpoint_name: str, data: Dict[str, Any]) -> str:
         """Format data for Twitter using template formatter (fallback).
