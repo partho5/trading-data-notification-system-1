@@ -9,12 +9,7 @@ This guide is for deploying the latest bot updates on your production server.
 ## ⚡ One-Command Deploy
 
 ```bash
-cd /root/trading-data-notification-system-1 && \
-git pull origin main && \
-pkill -f "python -m src.main" && \
-sleep 2 && \
-nohup uv run python -m src.main > bot.log 2>&1 & \
-sleep 5 && \
+./deploy.sh
 curl http://localhost:8080/health
 ```
 

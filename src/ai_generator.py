@@ -181,7 +181,7 @@ Indicators breakdown: {fear_count} showing fear, {greed_count} showing greed out
 Focus on what this means for traders and market direction. Be insightful and actionable."""
 
     def _prompt_reddit_trending_twitter(self, content: Dict[str, Any]) -> str:
-        tickers = content.get("tickers", [])[:5]
+        tickers = content.get("trending_tickers", [])[:5]
         ticker_list = [f"${t.get('ticker')} ({t.get('mentions')} mentions)" for t in tickers]
 
         return f"""Write a concise update about Reddit's most talked about stocks:
@@ -192,9 +192,9 @@ Top trending tickers:
 Focus on the retail sentiment and what's driving the conversation. Be insightful about the momentum."""
 
     def _prompt_top_gainers_twitter(self, content: Dict[str, Any]) -> str:
-        gainers = content.get("gainers", [])[:3]
+        gainers = content.get("data", [])[:3]
         gainer_list = [
-            f"{g.get('ticker')}: +{g.get('change_percent', 0):.1f}% (${g.get('price', 0):.2f})"
+            f"{g.get('ticker')}: +{g.get('change', '0%')} (${g.get('price', '0')})"
             for g in gainers
         ]
 
@@ -205,13 +205,16 @@ Focus on the retail sentiment and what's driving the conversation. Be insightful
 Focus on the strength of the market move and what traders should note. Be insightful."""
 
     def _prompt_sector_performance_twitter(self, content: Dict[str, Any]) -> str:
-        leaders = content.get("leaders", [])[:3]
-        laggards = content.get("laggards", [])[:2]
+        sectors = sorted(
+            content.get("sectors", []),
+            key=lambda s: s.get("change_percent", 0),
+            reverse=True,
+        )
+        leaders = sectors[:3]
+        laggards = sectors[-2:]
 
-        leader_list = [f"{s.get('sector')}: +{s.get('change_percent', 0):.1f}%" for s in leaders]
-        laggard_list = [
-            f"{s.get('sector')}: {s.get('change_percent', 0):.1f}%" for s in laggards
-        ]
+        leader_list = [f"{s.get('sector')}: +{s.get('change_percent', 0):.2f}%" for s in leaders]
+        laggard_list = [f"{s.get('sector')}: {s.get('change_percent', 0):.2f}%" for s in laggards]
 
         return f"""Write a concise update about today's sector performance:
 
@@ -236,8 +239,8 @@ Market sentiment: {sentiment}
 Focus on what this volatility level means for traders and risk management. Be actionable."""
 
     def _prompt_economic_calendar_twitter(self, content: Dict[str, Any]) -> str:
-        earnings = content.get("earnings", [])[:5]
-        earnings_list = [f"{e.get('ticker')} on {e.get('date')}" for e in earnings]
+        earnings = content.get("upcoming_earnings", [])[:5]
+        earnings_list = [f"{e.get('symbol')} on {e.get('date')} (est: ${e.get('estimate', 'N/A')})" for e in earnings]
 
         return f"""Write a concise update about upcoming earnings:
 
@@ -249,18 +252,19 @@ Focus on which reports traders should watch and why they matter."""
     def _prompt_sec_insider_twitter(self, content: Dict[str, Any]) -> str:
         filings = content.get("filings", [])[:3]
         filing_list = [
-            f"{f.get('ticker')}: {f.get('transaction_type')} (${f.get('value', 0)/1000000:.1f}M)"
+            f"{f.get('insider')} at {f.get('company')} filed Form {f.get('form')} on {f.get('filing_date')}"
             for f in filings
         ]
 
-        return f"""Write a concise update about recent insider trading:
+        return f"""Write a concise update about recent SEC insider trading filings:
 
 {chr(10).join(filing_list)}
 
 Focus on what these insider moves might signal about company outlook. Be insightful."""
 
-    def _prompt_yahoo_quote_twitter(self, content: Dict[str, Any]) -> str:
-        quotes = content.get("quotes", [])[:3]
+    def _prompt_yahoo_quote_twitter(self, content) -> str:
+        # content is a list directly for yahoo_quote (data["data"] = [...])
+        quotes = (content if isinstance(content, list) else content.get("quotes", []))[:3]
         quote_list = [
             f"{q.get('ticker')}: ${q.get('price', 0):.2f} ({q.get('change_percent', 0):+.1f}%)"
             for q in quotes

@@ -1,5 +1,6 @@
 """Twitter/X client for posting tweets with media."""
 
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -73,38 +74,49 @@ class TwitterClient:
 
             media_ids = []
 
-            # Upload media if provided
+            # Upload media with retry (SSL errors on upload.twitter.com are transient)
             if chart_path and chart_path.exists():
+                for attempt in range(2):
+                    try:
+                        logger.info(f"Uploading media: {chart_path}")
+                        media = self.api.media_upload(filename=str(chart_path))
+                        media_ids.append(media.media_id)
+                        logger.info(f"Media uploaded successfully: {media.media_id}")
+                        break
+                    except Exception as e:
+                        if attempt == 0:
+                            logger.warning(f"Media upload failed, retrying in 3s: {e}")
+                            time.sleep(3)
+                        else:
+                            logger.error(f"Failed to upload media after 2 attempts: {e}")
+                            # Continue posting without media
+
+            # Post tweet with retry (Twitter intermittently returns 403 on valid requests)
+            for attempt in range(2):
                 try:
-                    logger.info(f"Uploading media: {chart_path}")
-                    media = self.api.media_upload(filename=str(chart_path))
-                    media_ids.append(media.media_id)
-                    logger.info(f"Media uploaded successfully: {media.media_id}")
-                except Exception as e:
-                    logger.error(f"Failed to upload media: {e}")
-                    # Continue without media
+                    if media_ids:
+                        response = self.client.create_tweet(
+                            text=text,
+                            media_ids=media_ids,
+                        )
+                    else:
+                        response = self.client.create_tweet(text=text)
 
-            # Post tweet using v2 API
-            try:
-                if media_ids:
-                    response = self.client.create_tweet(
-                        text=text,
-                        media_ids=media_ids,
-                    )
-                else:
-                    response = self.client.create_tweet(text=text)
+                    if response and response.data:
+                        tweet_id = response.data.get("id")
+                        logger.info(f"Tweet posted successfully: {tweet_id}")
+                        return True
+                    else:
+                        logger.error("Tweet post failed: No response data")
+                        return False
 
-                if response and response.data:
-                    tweet_id = response.data.get("id")
-                    logger.info(f"Tweet posted successfully: {tweet_id}")
-                    return True
-                else:
-                    logger.error("Tweet post failed: No response data")
+                except tweepy.TweepyException as e:
+                    if "403" in str(e) and attempt == 0:
+                        logger.warning(f"Tweet returned 403, retrying in 5s: {e}")
+                        time.sleep(5)
+                        continue
+                    logger.error(f"Tweepy error: {e}")
                     return False
-
-            except tweepy.TweepyException as e:
-                logger.error(f"Tweepy error: {e}")
-                return False
 
         except Exception as e:
             logger.error(f"Twitter post error: {e}")

@@ -96,7 +96,7 @@ class HealthMonitor:
             "sector_performance": {"api_method": "get_sector_performance", "market_hours_only": False},
             "economic_calendar": {"api_method": "get_economic_calendar", "market_hours_only": False},
             "vix": {"api_method": "get_vix", "market_hours_only": False},
-            "sec_insider": {"api_method": "get_sec_insider", "market_hours_only": False},
+            "sec_insider": {"api_method": "get_sec_insider_filings", "market_hours_only": False},
         }
 
         if endpoint not in endpoint_config:

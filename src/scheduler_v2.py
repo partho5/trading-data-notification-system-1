@@ -44,92 +44,90 @@ class ScheduleSlot:
 
 
 class OptimalScheduler:
-    """Scheduler with audience-first CRON scheduling and dynamic adjustment."""
+    """Scheduler with dynamic CRON scheduling auto-adjusted to the active endpoint count.
 
-    # Maximum posts per day (X free tier limit)
-    MAX_DAILY_POSTS = 17
+    Discord: every endpoint posts on every scheduled run (no cap).
+    Twitter: total daily posts capped at config.twitter_max_posts_per_day,
+             distributed across endpoints by priority.
+    Adding or removing an endpoint automatically rebalances the schedule.
+    """
 
-    # Endpoint configuration with priorities
+    # Endpoint configuration — no hardcoded times or frequencies.
+    # 'window'      : 'full_day' (7:00–16:15) or 'market_hours' (9:30–15:30)
+    # 'fixed_times' : [(hour, minute), ...] — bypasses dynamic time generation
+    # 'max_daily'   : used with fixed_times; these slots are reserved first
+    # 'day_of_week' : APScheduler CRON day-of-week string (e.g. "0,2,4")
     ENDPOINT_CONFIG = {
-        # PREMIUM (Benzinga - Client paid) - 60% of budget = 10 posts
+        # PREMIUM (Benzinga - client paid) — highest priority, gets most Twitter slots
         "benzinga_news": {
             "priority": EndpointPriority.PREMIUM,
-            "posts_per_day": 6,
-            "times": [(7, 0), (9, 45), (11, 15), (13, 0), (14, 30), (16, 15)],
             "api_method": "get_benzinga_news",
+            "window": "full_day",
         },
         "benzinga_ratings": {
             "priority": EndpointPriority.PREMIUM,
-            "posts_per_day": 3,
-            "times": [(8, 0), (12, 0), (15, 0)],
             "api_method": "get_benzinga_ratings",
+            "window": "full_day",
         },
         "benzinga_earnings": {
             "priority": EndpointPriority.PREMIUM,
-            "posts_per_day": 1,
-            "times": [(7, 30)],
             "api_method": "get_benzinga_earnings",
+            "window": "full_day",
         },
 
-        # MARKET (Live updates) - 25% of budget = 4 posts
+        # MARKET (live data, market-hours only)
         "yahoo_quote": {
             "priority": EndpointPriority.MARKET,
-            "posts_per_day": 3,
-            "times": [(10, 0), (13, 30), (15, 30)],
             "api_method": "get_yahoo_finance_quote",
+            "window": "market_hours",
             "market_hours_only": True,
         },
         "top_gainers": {
             "priority": EndpointPriority.MARKET,
-            "posts_per_day": 1,
-            "times": [(14, 0)],
             "api_method": "get_top_gainers",
+            "window": "market_hours",
             "market_hours_only": True,
         },
 
-        # ANALYSIS (Sentiment) - 10% of budget = 2 posts
+        # ANALYSIS (sentiment)
         "reddit_trending": {
             "priority": EndpointPriority.ANALYSIS,
-            "posts_per_day": 1,
-            "times": [(9, 0)],
             "api_method": "get_reddit_trending",
+            "window": "full_day",
         },
         "cnn_fear_greed": {
             "priority": EndpointPriority.ANALYSIS,
-            "posts_per_day": 1,
-            "times": [(8, 30)],
             "api_method": "get_cnn_fear_greed",
+            "window": "full_day",
         },
 
-        # DAILY_RECAP - 5% of budget = 1 post (rotate between 3)
+        # DAILY_RECAP — fixed time, once per occurrence, reserves 1 Twitter slot each
         "sector_performance": {
             "priority": EndpointPriority.DAILY_RECAP,
-            "posts_per_day": 1,
-            "times": [(16, 30)],  # After market close
             "api_method": "get_sector_performance",
+            "fixed_times": [(16, 30)],   # After market close, every day
+            "max_daily": 1,
         },
-
-        # These rotate every 3 days (Mon/Wed/Fri or Tue/Thu/Sat)
         "economic_calendar": {
             "priority": EndpointPriority.DAILY_RECAP,
-            "posts_per_day": 0.33,  # Every 3 days
-            "times": [(6, 30)],
             "api_method": "get_economic_calendar",
-            "day_of_week": "0,2,4",  # Mon, Wed, Fri
+            "fixed_times": [(6, 30)],
+            "max_daily": 1,
+            "day_of_week": "0,2,4",      # Mon, Wed, Fri
         },
         "vix": {
             "priority": EndpointPriority.DAILY_RECAP,
-            "posts_per_day": 0.33,
-            "times": [(6, 30)],
             "api_method": "get_vix",
-            "day_of_week": "1,3",  # Tue, Thu
+            "fixed_times": [(6, 30)],
+            "max_daily": 1,
+            "day_of_week": "1,3",        # Tue, Thu
         },
         "sec_insider": {
             "priority": EndpointPriority.DAILY_RECAP,
-            "posts_per_day": 0.33,
-            "times": [(6, 30)],
-            "api_method": "get_sec_insider",
-            "day_of_week": "5,6",  # Sat, Sun (for week recap)
+            "api_method": "get_sec_insider_filings",
+            "fixed_times": [(6, 30)],
+            "max_daily": 1,
+            "day_of_week": "5,6",        # Sat, Sun
         },
     }
 
@@ -226,10 +224,10 @@ class OptimalScheduler:
             "benzinga_news": lambda c: bool(c.get("articles")),
             "benzinga_ratings": lambda c: bool(c.get("ratings")),
             "benzinga_earnings": lambda c: bool(c.get("earnings")),
-            "reddit_trending": lambda c: bool(c.get("tickers")),
-            "top_gainers": lambda c: bool(c.get("gainers")),
+            "reddit_trending": lambda c: bool(c.get("trending_tickers")),
+            "top_gainers": lambda c: bool(c.get("data")),
             "sec_insider": lambda c: bool(c.get("filings")),
-            "economic_calendar": lambda c: bool(c.get("earnings")),
+            "economic_calendar": lambda c: bool(c.get("upcoming_earnings")),
             "yahoo_quote": lambda c: bool(c if isinstance(c, list) else c.get("quotes")),
             "sector_performance": lambda c: bool(c.get("sectors") or c.get("leaders")),
         }
@@ -241,12 +239,94 @@ class OptimalScheduler:
         # Default: assume has content if we got here
         return True
 
-    async def _post_content(self, endpoint_name: str, data: Dict[str, Any]):
+    @staticmethod
+    def _generate_times(n_slots: int, window: str) -> List[tuple]:
+        """Generate N evenly-spaced (hour, minute) tuples across a posting window.
+
+        Args:
+            n_slots: Number of posting slots required
+            window:  'full_day' (7:00–16:15 ET) or 'market_hours' (9:30–15:30 ET)
+
+        Returns:
+            List of (hour, minute) tuples
+        """
+        if n_slots <= 0:
+            return []
+
+        windows = {
+            "full_day":     (7 * 60,       16 * 60 + 15),  # 7:00 – 16:15
+            "market_hours": (9 * 60 + 30,  15 * 60 + 30),  # 9:30 – 15:30
+        }
+        start, end = windows.get(window, windows["full_day"])
+
+        if n_slots == 1:
+            return [(start // 60, start % 60)]
+
+        interval = (end - start) / (n_slots - 1)
+        times = []
+        for i in range(n_slots):
+            t = round(start + i * interval)
+            times.append((t // 60, t % 60))
+        return times
+
+    def _allocate_slots(self) -> Dict[str, int]:
+        """Dynamically allocate Twitter posting slots across active endpoints.
+
+        Fixed (once-daily) endpoints always reserve their max_daily slots first.
+        The remaining cap is distributed to flexible endpoints by priority —
+        higher-priority endpoints receive more slots when there is a remainder.
+        If the cap is exhausted, lower-priority endpoints get 0 Twitter slots
+        (they still post to Discord on every scheduled run).
+
+        Returns:
+            Dict mapping endpoint_name -> number of Twitter slots per day
+        """
+        daily_cap = self.config.twitter_max_posts_per_day
+
+        fixed_eps = [
+            ep for ep in self.active_endpoints
+            if self.ENDPOINT_CONFIG[ep].get("max_daily") is not None
+        ]
+        flexible_eps = [ep for ep in self.active_endpoints if ep not in fixed_eps]
+
+        allocation: Dict[str, int] = {}
+
+        # Fixed endpoints always get exactly their max_daily
+        for ep in fixed_eps:
+            allocation[ep] = self.ENDPOINT_CONFIG[ep]["max_daily"]
+
+        remaining = daily_cap - sum(allocation.values())
+        n_flex = len(flexible_eps)
+
+        if n_flex == 0:
+            return allocation
+
+        if remaining <= 0:
+            # Cap already consumed by fixed endpoints — flexible are Discord-only
+            for ep in flexible_eps:
+                allocation[ep] = 0
+            return allocation
+
+        # Base slots per flexible endpoint, remainder to highest-priority first
+        base = remaining // n_flex
+        extra = remaining % n_flex
+
+        sorted_flex = sorted(
+            flexible_eps,
+            key=lambda ep: self.ENDPOINT_CONFIG[ep]["priority"].value,
+        )
+        for i, ep in enumerate(sorted_flex):
+            allocation[ep] = base + (1 if i < extra else 0)
+
+        return allocation
+
+    async def _post_content(self, endpoint_name: str, data: Dict[str, Any], chart_url: Optional[str] = None):
         """Post content to Twitter and Discord with deduplication and rate limiting.
 
         Args:
             endpoint_name: Name of the endpoint
             data: API response data
+            chart_url: Optional chart image URL to download and attach
         """
         if not data.get("success"):
             logger.warning(f"API request failed for {endpoint_name}, skipping post")
@@ -257,6 +337,11 @@ class OptimalScheduler:
         if not self._has_content(endpoint_name, data):
             logger.info(f"No data available for {endpoint_name}, skipping (empty response)")
             return
+
+        # Download chart if available
+        chart_path = None
+        if chart_url and self.chart_handler:
+            chart_path = await self.chart_handler.download_chart(chart_url)
 
         # Generate content (AI first, fallback to templates)
         twitter_text = None
@@ -306,10 +391,10 @@ class OptimalScheduler:
                         color=0x3498DB,
                         timestamp=datetime.now(),
                     )
-                    await self.discord_client.post_embed(discord_embed)
+                    await self.discord_client.post_embed(discord_embed, chart_path)
                 else:
                     discord_embed = self._format_for_discord(endpoint_name, data)
-                    await self.discord_client.post_embed(discord_embed)
+                    await self.discord_client.post_embed(discord_embed, chart_path)
 
                 # Record successful Discord post
                 self.deduplicator.record_post(data, endpoint_name, "discord")
@@ -324,26 +409,28 @@ class OptimalScheduler:
             if self.deduplicator.is_duplicate(data, endpoint_name, "twitter"):
                 logger.info(f"Duplicate content for {endpoint_name} on Twitter, skipping")
                 self.stats["skipped_duplicates"] += 1
-            elif self.rate_limiter.can_post():
-                if not self.config.dry_run:
-                    success = self.twitter_client.post_tweet(twitter_text)
-                    if success:
-                        self.rate_limiter.record_post()
-
-                        # Record successful Twitter post
-                        self.deduplicator.record_post(data, endpoint_name, "twitter")
-                        logger.info(f"Posted to Twitter: {endpoint_name}")
-                    else:
-                        logger.error(f"Failed to post to Twitter: {endpoint_name}")
-                        self.stats["failed_posts"] += 1
-                        return
-                else:
-                    logger.info(f"[DRY RUN] Would post to Twitter: {twitter_text[:100]}...")
-
-                self.stats["successful_posts"] += 1
             else:
-                logger.warning(f"Rate limit reached, skipping Twitter post for {endpoint_name}")
-                self.stats["rate_limit_blocks"] += 1
+                can_post, rate_limit_reason = self.rate_limiter.can_post()
+                if can_post:
+                    if not self.config.dry_run:
+                        success = self.twitter_client.post_tweet(twitter_text, chart_path)
+                        if success:
+                            self.rate_limiter.record_post()
+
+                            # Record successful Twitter post
+                            self.deduplicator.record_post(data, endpoint_name, "twitter")
+                            logger.info(f"Posted to Twitter: {endpoint_name}")
+                        else:
+                            logger.error(f"Failed to post to Twitter: {endpoint_name}")
+                            self.stats["failed_posts"] += 1
+                            return
+                    else:
+                        logger.info(f"[DRY RUN] Would post to Twitter: {twitter_text[:100]}...")
+
+                    self.stats["successful_posts"] += 1
+                else:
+                    logger.warning(f"Rate limit reached, skipping Twitter post for {endpoint_name}: {rate_limit_reason}")
+                    self.stats["rate_limit_blocks"] += 1
         except Exception as e:
             logger.error(f"Twitter posting error for {endpoint_name}: {e}")
             self.stats["failed_posts"] += 1
@@ -426,79 +513,99 @@ class OptimalScheduler:
             # Call API
             data = await api_method()
 
+            # Extract chart URL from response (present on CNN, Reddit, Gainers, Sector endpoints)
+            data_payload = data.get("data")
+            chart_url = data_payload.get("graphics") if isinstance(data_payload, dict) else None
+
             # Post content
-            await self._post_content(endpoint_name, data)
+            await self._post_content(endpoint_name, data, chart_url)
 
         except Exception as e:
             logger.error(f"Job error for {endpoint_name}: {e}")
 
     def add_jobs(self):
-        """Add all scheduled jobs using CRON triggers."""
+        """Add all scheduled jobs with dynamically computed CRON triggers.
+
+        Twitter allocation is derived from config.twitter_max_posts_per_day
+        and spread across active endpoints by priority.
+        Discord receives every scheduled run regardless of Twitter limits.
+        Calling this again (e.g. after add_endpoint/remove_endpoint) is safe
+        because replace_existing=True is used on every job.
+        """
+        allocation = self._allocate_slots()
+        total_twitter = sum(allocation.values())
+
         logger.info("=" * 60)
-        logger.info("Adding OPTIMAL CRON-based schedule (17 posts/day)")
+        logger.info(
+            f"Dynamic schedule: {len(self.active_endpoints)} endpoint types, "
+            f"{total_twitter} Twitter posts/day "
+            f"(cap={self.config.twitter_max_posts_per_day})"
+        )
+        logger.info("Discord: ALL types posted on every scheduled run (no cap)")
         logger.info("=" * 60)
 
-        total_daily_posts = 0
+        for endpoint_name in self.active_endpoints:
+            ep_config = self.ENDPOINT_CONFIG[endpoint_name]
+            api_method = ep_config["api_method"]
+            market_hours_only = ep_config.get("market_hours_only", False)
+            day_of_week = ep_config.get("day_of_week")
+            n_twitter = allocation[endpoint_name]
 
-        for endpoint_name, config in self.ENDPOINT_CONFIG.items():
-            if endpoint_name not in self.active_endpoints:
-                logger.debug(f"Skipping disabled endpoint: {endpoint_name}")
-                continue
-
-            times = config.get("times", [])
-            api_method = config["api_method"]
-            market_hours_only = config.get("market_hours_only", False)
-            day_of_week = config.get("day_of_week")  # For rotating daily posts
+            # Determine posting times
+            if "fixed_times" in ep_config:
+                times = ep_config["fixed_times"]
+            elif n_twitter > 0:
+                times = self._generate_times(n_twitter, ep_config.get("window", "full_day"))
+            else:
+                # 0 Twitter slots — still schedule 2 runs/day for Discord
+                times = self._generate_times(2, ep_config.get("window", "full_day"))
 
             for hour, minute in times:
                 job_id = f"{endpoint_name}_{hour:02d}{minute:02d}"
 
-                # Create CRON trigger
                 if day_of_week:
-                    # Rotating schedule (e.g., Mon/Wed/Fri)
                     trigger = CronTrigger(
-                        hour=hour,
-                        minute=minute,
-                        day_of_week=day_of_week,
-                        timezone=self.tz,
+                        hour=hour, minute=minute,
+                        day_of_week=day_of_week, timezone=self.tz,
                     )
                 else:
-                    # Daily schedule
-                    trigger = CronTrigger(
-                        hour=hour,
-                        minute=minute,
-                        timezone=self.tz,
-                    )
+                    trigger = CronTrigger(hour=hour, minute=minute, timezone=self.tz)
 
-                # Add job
                 self.scheduler.add_job(
                     self._execute_job,
                     trigger=trigger,
                     args=[endpoint_name, api_method, market_hours_only],
                     id=job_id,
                     name=f"{endpoint_name} @ {hour:02d}:{minute:02d} ET",
+                    replace_existing=True,
                 )
 
                 logger.info(
-                    f"✓ Scheduled: {endpoint_name:20s} @ {hour:02d}:{minute:02d} ET "
-                    f"[{config['priority'].name}]"
+                    f"✓ {endpoint_name:20s} @ {hour:02d}:{minute:02d} ET"
+                    f"  [{ep_config['priority'].name}]"
+                    f"  [twitter={n_twitter}/day  discord=all]"
                 )
 
-            total_daily_posts += config["posts_per_day"]
-
-        # Add cleanup job (doesn't count toward daily limit)
+        # Cleanup at midnight — does not count toward daily limit
         self.scheduler.add_job(
             self.job_cleanup,
             trigger=CronTrigger(hour=0, minute=0, timezone=self.tz),
             id="cleanup",
             name="Daily Cleanup",
+            replace_existing=True,
         )
-        logger.info("✓ Scheduled: cleanup @ 00:00 ET [SYSTEM]")
+        logger.info("✓ cleanup @ 00:00 ET [SYSTEM]")
 
         logger.info("=" * 60)
-        logger.info(f"Total daily posts: {total_daily_posts:.1f} (target: {self.MAX_DAILY_POSTS})")
-        logger.info(f"All posts between 6:30 AM - 4:30 PM ET (audience waking hours)")
-        logger.info(f"Overnight (8 PM - 6 AM): ZERO posts (respects audience sleep)")
+        logger.info(
+            f"Twitter: {total_twitter} posts/day across "
+            f"{len(self.active_endpoints)} endpoint types"
+        )
+        logger.info(
+            f"Discord: all {len(self.active_endpoints)} types, "
+            f"every run, no cap"
+        )
+        logger.info(f"Window: 6:30 AM – 4:30 PM {self.config.timezone}")
         logger.info("=" * 60)
 
     async def job_cleanup(self):
@@ -539,79 +646,76 @@ class OptimalScheduler:
             logger.info("Scheduler stopped")
 
     def get_schedule_summary(self) -> List[Dict[str, Any]]:
-        """Get human-readable schedule summary.
-
-        Returns:
-            List of scheduled times with endpoints
-        """
+        """Get human-readable schedule summary derived from current dynamic allocation."""
+        allocation = self._allocate_slots()
         schedule = []
-        for endpoint_name, config in self.ENDPOINT_CONFIG.items():
-            if endpoint_name not in self.active_endpoints:
-                continue
 
-            for hour, minute in config.get("times", []):
+        for endpoint_name in self.active_endpoints:
+            ep_config = self.ENDPOINT_CONFIG[endpoint_name]
+            n_twitter = allocation[endpoint_name]
+
+            if "fixed_times" in ep_config:
+                times = ep_config["fixed_times"]
+            elif n_twitter > 0:
+                times = self._generate_times(n_twitter, ep_config.get("window", "full_day"))
+            else:
+                times = self._generate_times(2, ep_config.get("window", "full_day"))
+
+            for hour, minute in times:
                 schedule.append({
                     "time": f"{hour:02d}:{minute:02d} ET",
                     "endpoint": endpoint_name,
-                    "priority": config["priority"].name,
+                    "priority": ep_config["priority"].name,
+                    "twitter_slots_per_day": n_twitter,
+                    "discord": "always",
+                    "day_of_week": ep_config.get("day_of_week", "daily"),
                 })
 
-        # Sort by time
         schedule.sort(key=lambda x: x["time"])
         return schedule
 
     # === Dynamic Adjustment Methods ===
 
     def add_endpoint(self, endpoint_name: str, config: Dict[str, Any]):
-        """Dynamically add a new endpoint and rebalance schedule.
+        """Dynamically add a new endpoint and rebalance the full schedule.
 
         Args:
             endpoint_name: New endpoint name
-            config: Endpoint configuration
+            config: Endpoint configuration dict (same structure as ENDPOINT_CONFIG)
         """
         self.ENDPOINT_CONFIG[endpoint_name] = config
         self.active_endpoints.append(endpoint_name)
-
-        # Rebalance to stay within daily limit
         self._rebalance_schedule()
-
-        logger.info(f"Added endpoint: {endpoint_name}, rebalanced schedule")
+        logger.info(f"Added endpoint '{endpoint_name}', schedule rebalanced")
 
     def remove_endpoint(self, endpoint_name: str):
-        """Dynamically remove an endpoint and rebalance schedule.
+        """Dynamically remove an endpoint and rebalance the full schedule.
 
         Args:
             endpoint_name: Endpoint to remove
         """
         if endpoint_name in self.active_endpoints:
             self.active_endpoints.remove(endpoint_name)
-
-            # Rebalance to redistribute freed slots
             self._rebalance_schedule()
-
-            logger.info(f"Removed endpoint: {endpoint_name}, rebalanced schedule")
+            logger.info(f"Removed endpoint '{endpoint_name}', schedule rebalanced")
 
     def _rebalance_schedule(self):
-        """Recalculate posting frequencies to respect daily limit."""
-        # Count current daily posts
-        total = sum(
-            self.ENDPOINT_CONFIG[ep].get("posts_per_day", 0)
-            for ep in self.active_endpoints
+        """Remove all non-system CRON jobs and re-add with freshly computed allocation.
+
+        Called automatically by add_endpoint() and remove_endpoint().
+        Safe to call while the scheduler is running.
+        """
+        if not self.scheduler.running:
+            return
+
+        # Remove all dynamically generated jobs (keep cleanup)
+        for job in self.scheduler.get_jobs():
+            if job.id != "cleanup":
+                job.remove()
+
+        # Re-add with updated allocation
+        self.add_jobs()
+        logger.info(
+            f"Schedule rebalanced: {len(self.active_endpoints)} endpoints, "
+            f"{sum(self._allocate_slots().values())} Twitter posts/day"
         )
-
-        if total > self.MAX_DAILY_POSTS:
-            # Need to reduce frequencies
-            logger.warning(f"Schedule exceeds daily limit ({total} > {self.MAX_DAILY_POSTS})")
-            logger.warning("Reducing frequency of lower-priority endpoints...")
-
-            # Reduce non-premium endpoints proportionally
-            # (Premium always gets priority)
-            # This is a simplified version - production would be more sophisticated
-
-        elif total < self.MAX_DAILY_POSTS:
-            # Can increase frequencies
-            logger.info(f"Schedule under limit ({total} < {self.MAX_DAILY_POSTS})")
-            logger.info("Could increase frequency of high-priority endpoints")
-
-        # Note: Actual rebalancing would require stopping scheduler,
-        # recalculating time slots, and restarting. For now, just log.
